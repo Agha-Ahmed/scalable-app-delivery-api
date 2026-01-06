@@ -12,6 +12,10 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+# ✅ Step 5.6: Build-time build id (from CI) -> available at runtime automatically
+ARG BUILD_ID=local
+ENV BUILD_ID=$BUILD_ID
+
 # Security hardening: create non-root user
 RUN addgroup -S app && adduser -S app -G app
 

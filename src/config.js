@@ -11,6 +11,7 @@ function requireEnv(name, fallback) {
 
 module.exports = {
   port: Number(requireEnv("PORT", 3000)),
-  buildId: requireEnv("BUILD_ID", "local"),
+//buildId: requireEnv("BUILD_ID", "local"),
+buildId: process.env.BUILD_ID || process.env.GIT_SHA || "local",
   nodeEnv: requireEnv("NODE_ENV", "development"),
 };
