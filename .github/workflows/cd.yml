@@ -4,13 +4,9 @@ on:
   push:
     branches: ["main"]
 
-jobs:
+jjobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,32 +15,26 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: us-east-1
 
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      ✅ - name: Debug vars
+        run: |
+          echo "ECR_REPO=$ECR_REPO"
+          echo "AWS_REGION=$AWS_REGION"
+          echo "ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)"
+
       - name: Build and push image
-        env:
-          ECR_REPO: ${{ vars.ECR_REPO }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           IMAGE_URI="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO"
 
           docker build \
-            --label org.opencontainers.image.revision="$GITHUB_SHA" \
-            --label org.opencontainers.image.source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             -t "$IMAGE_URI:sha-$SHORT_SHA" \
-            -t "$IMAGE_URI:latest" \
-            .
+            -t "$IMAGE_URI:latest" .
 
           docker push "$IMAGE_URI:sha-$SHORT_SHA"
           docker push "$IMAGE_URI:latest"
-
-      - name: Trigger App Runner deployment
-        env:
-          SERVICE_ARN: ${{ vars.APP_RUNNER_SERVICE_ARN }}
-        run: |
-          aws apprunner start-deployment --service-arn "$SERVICE_ARN"
