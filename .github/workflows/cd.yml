@@ -20,7 +20,7 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      ✅ - name: Debug vars
+      - name: Debug vars
         run: |
           echo "ECR_REPO=$ECR_REPO"
           echo "AWS_REGION=$AWS_REGION"
