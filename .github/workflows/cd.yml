@@ -1,8 +1,11 @@
 name: CD
 
+# Trigger this workflow after the CI workflow completes.
 on:
-  push:
-    branches: ["main"]
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
 
 permissions:
   id-token: write
@@ -11,10 +14,14 @@ permissions:
 env:
   AWS_REGION: us-east-1
   ECR_REPO: scalable-api
+  SERVICE_NAME: scalable-app-delivery-api
 
 jobs:
   deploy:
+    # Only run when CI finished successfully on main
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' }}
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,12 +37,6 @@ jobs:
 
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Debug vars
-        run: |
-          echo "ECR_REPO=${{ env.ECR_REPO }}"
-          echo "AWS_REGION=${{ env.AWS_REGION }}"
-          echo "ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)"
 
       - name: Set image variables
         id: vars
@@ -69,7 +70,72 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ env.SHORT_SHA }}
 
-      - name: Smoke test pushed image (optional)
+      - name: Deploy to App Runner (create or update)
+        env:
+          SERVICE_NAME: ${{ env.SERVICE_NAME }}
         run: |
-          # quick verify that image exists in ECR
-          aws ecr describe-images --repository-name ${{ env.ECR_REPO }} --image-ids imageTag=sha-${{ env.SHORT_SHA }} --region ${{ env.AWS_REGION }} || (echo "Image not found" && exit 1)
+          SHORT_SHA="${{ env.SHORT_SHA }}"
+          ACCOUNT_ID="${{ env.ACCOUNT_ID }}"
+          IMAGE="$ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:sha-$SHORT_SHA"
+
+          echo "Using image: $IMAGE"
+
+          # Find existing service ARN (if any)
+          SERVICE_ARN=$(aws apprunner list-services --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME'].ServiceArn | [0]" --output text || echo "")
+
+          # Build JSON for ImageRepository source configuration (App Runner)
+          # Use single-quoted strings carefully for shell; pass to aws cli as a JSON string
+          IMAGE_CONFIG=$(jq -c -n --arg img "$IMAGE" --arg port "3000" --arg build "$SHORT_SHA" '{
+            ImageRepository: {
+              ImageIdentifier: $img,
+              ImageRepositoryType: "ECR",
+              ImageConfiguration: {
+                Port: $port,
+                RuntimeEnvironmentVariables: [
+                  { Name: "BUILD_ID", Value: $build }
+                ]
+              }
+            }
+          }')
+
+          if [ -z "$SERVICE_ARN" ] || [ "$SERVICE_ARN" = "None" ]; then
+            echo "Creating App Runner service..."
+            aws apprunner create-service --service-name "$SERVICE_NAME" --source-configuration "$IMAGE_CONFIG"
+          else
+            echo "Updating App Runner service..."
+            aws apprunner update-service --service-arn "$SERVICE_ARN" --source-configuration "$IMAGE_CONFIG"
+          fi
+
+      - name: Wait for service URL
+        run: |
+          # get service url (wait up to ~3 minutes)
+          ATTEMPTS=30
+          for i in $(seq 1 $ATTEMPTS); do
+            SERVICE_URL=$(aws apprunner list-services --query "ServiceSummaryList[?ServiceName=='${{ env.SERVICE_NAME }}'].ServiceUrl | [0]" --output text || echo "")
+            if [ -n "$SERVICE_URL" ] && [ "$SERVICE_URL" != "None" ]; then
+              echo "Service URL: $SERVICE_URL"
+              echo "SERVICE_URL=$SERVICE_URL" >> $GITHUB_ENV
+              exit 0
+            fi
+            echo "Waiting for App Runner service URL... ($i/$ATTEMPTS)"
+            sleep 6
+          done
+          echo "Timed out waiting for service URL"
+          exit 1
+
+      - name: Smoke test deployed service (/version matches BUILD_ID)
+        run: |
+          SERVICE_URL="${{ env.SERVICE_URL }}"
+          SHORT_SHA="${{ env.SHORT_SHA }}"
+          echo "Service URL is $SERVICE_URL"
+          for i in 1 12; do
+            echo "Attempt $i: GET $SERVICE_URL/version"
+            RES=$(curl -sS "$SERVICE_URL/version" || true)
+            if echo "$RES" | grep -q "$SHORT_SHA"; then
+              echo "Smoke test passed: /version contains $SHORT_SHA"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Smoke test failed: /version did not contain $SHORT_SHA"
+          exit 1
